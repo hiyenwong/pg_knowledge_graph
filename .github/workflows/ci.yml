@@ -8,6 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_PGRX_VERSION: "=0.17.0"
 
 jobs:
   test:
@@ -35,31 +36,39 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pg${{ matrix.pg }}-cargo-
 
+      - name: Install system dependencies (Ubuntu)
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
+
       - name: Install cargo-pgrx
-        run: cargo install cargo-pgrx --version "=0.12.9" --locked
+        run: cargo install cargo-pgrx --version "${{ env.CARGO_PGRX_VERSION }}" --locked
 
       - name: Initialize pgrx for PG${{ matrix.pg }}
         run: cargo pgrx init --pg${{ matrix.pg }} download
 
       - name: Run tests
         run: cargo pgrx test pg${{ matrix.pg }}
-        env:
-          # Required on macOS with Apple clang for bindgen to find system headers
-          BINDGEN_EXTRA_CLANG_ARGS: "-I$(xcrun --show-sdk-path)/usr/include"
 
   lint:
     name: Lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+
+      - name: Install system dependencies (Ubuntu)
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
+
       - name: Check formatting
         run: cargo fmt --check
-      - name: Install cargo-pgrx (for feature flags)
-        run: cargo install cargo-pgrx --version "=0.12.9" --locked
+
+      - name: Install cargo-pgrx
+        run: cargo install cargo-pgrx --version "${{ env.CARGO_PGRX_VERSION }}" --locked
+
       - name: Initialize pgrx
-        run: cargo pgrx init --pg17 download
+        run: cargo pgrx init --pg18 download
+
       - name: Clippy
-        run: cargo clippy --features pg17 -- -D warnings
+        run: cargo clippy --no-default-features --features pg18 -- -D warnings
