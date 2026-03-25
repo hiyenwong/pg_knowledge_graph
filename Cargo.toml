@@ -1,0 +1,38 @@
+[package]
+name = "pg_knowledge_graph"
+version = "0.1.0"
+edition = "2021"
+description = "PostgreSQL knowledge graph extension with graph algorithms and pgvector integration"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+name = "pgrx_embed_pg_knowledge_graph"
+path = "./src/bin/pgrx_embed.rs"
+
+[features]
+default = ["pg17"]
+pg16 = ["pgrx/pg16", "pgrx-tests/pg16"]
+pg17 = ["pgrx/pg17", "pgrx-tests/pg17"]
+pg18 = ["pgrx/pg18", "pgrx-tests/pg18"]
+pg_test = []
+
+[dependencies]
+pgrx = "=0.17.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+
+[dev-dependencies]
+pgrx-tests = "=0.17.0"
+
+[profile.dev]
+panic = "unwind"
+
+[profile.release]
+panic = "unwind"
+opt-level = 3
+lto = "fat"
+codegen-units = 1
