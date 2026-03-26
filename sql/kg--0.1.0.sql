@@ -1,10 +1,14 @@
 -- pg_knowledge_graph schema
+-- Requires: pgvector extension
+CREATE EXTENSION IF NOT EXISTS vector;
+
 -- Entities table
 CREATE TABLE IF NOT EXISTS kg_entities (
     id          BIGSERIAL PRIMARY KEY,
     entity_type TEXT      NOT NULL,
     name        TEXT      NOT NULL,
     properties  JSONB     NOT NULL DEFAULT '{}',
+    embedding   vector(1536),  -- OpenAI text-embedding-ada-002/003 dimension
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -12,6 +16,7 @@ CREATE TABLE IF NOT EXISTS kg_entities (
 CREATE INDEX IF NOT EXISTS idx_kg_entities_type ON kg_entities (entity_type);
 CREATE INDEX IF NOT EXISTS idx_kg_entities_name ON kg_entities (name);
 CREATE INDEX IF NOT EXISTS idx_kg_entities_type_name ON kg_entities (entity_type, name);
+CREATE INDEX IF NOT EXISTS idx_kg_entities_embedding ON kg_entities USING hnsw (embedding vector_cosine_ops);
 
 -- Relations table
 CREATE TABLE IF NOT EXISTS kg_relations (

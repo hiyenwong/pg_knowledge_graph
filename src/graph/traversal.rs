@@ -1,6 +1,9 @@
 use serde::Serialize;
 use std::collections::{HashMap, HashSet, VecDeque};
 
+/// Queue/stack item for traversal: (node_id, depth, parent_id, rel_type, weight)
+type TraversalItem = (i64, i64, Option<i64>, Option<String>, f64);
+
 #[derive(Debug, Serialize)]
 pub struct TraversalNode {
     pub entity_id: i64,
@@ -64,8 +67,7 @@ pub fn bfs(start_id: i64, max_depth: i64) -> Vec<TraversalNode> {
 
     let mut result: Vec<TraversalNode> = Vec::new();
     let mut visited: HashSet<i64> = HashSet::new();
-    // queue: (node_id, depth, parent_id, rel_type, weight)
-    let mut queue: VecDeque<(i64, i64, Option<i64>, Option<String>, f64)> = VecDeque::new();
+    let mut queue: VecDeque<TraversalItem> = VecDeque::new();
 
     visited.insert(start_id);
     queue.push_back((start_id, 0, None, None, 0.0));
@@ -102,8 +104,7 @@ pub fn dfs(start_id: i64, max_depth: i64) -> Vec<TraversalNode> {
 
     let mut result: Vec<TraversalNode> = Vec::new();
     let mut visited: HashSet<i64> = HashSet::new();
-    // stack: (node_id, depth, parent_id, rel_type, weight)
-    let mut stack: Vec<(i64, i64, Option<i64>, Option<String>, f64)> = Vec::new();
+    let mut stack: Vec<TraversalItem> = Vec::new();
 
     stack.push((start_id, 0, None, None, 0.0));
 

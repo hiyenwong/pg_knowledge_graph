@@ -45,6 +45,14 @@ jobs:
       - name: Initialize pgrx for PG${{ matrix.pg }}
         run: cargo pgrx init --pg${{ matrix.pg }} download
 
+      - name: Install pgvector
+        run: |
+          git clone --branch v0.8.0 https://github.com/pgvector/pgvector.git
+          cd pgvector
+          export PG_CONFIG=~/.pgrx/${{ matrix.pg }}.*/pgrx-install/bin/pg_config
+          make
+          make install
+
       - name: Run tests
         run: cargo pgrx test pg${{ matrix.pg }}
 
@@ -69,6 +77,14 @@ jobs:
 
       - name: Initialize pgrx
         run: cargo pgrx init --pg18 download
+
+      - name: Install pgvector
+        run: |
+          git clone --branch v0.8.0 https://github.com/pgvector/pgvector.git
+          cd pgvector
+          export PG_CONFIG=~/.pgrx/18.*/pgrx-install/bin/pg_config
+          make
+          make install
 
       - name: Clippy
         run: cargo clippy --no-default-features --features pg18 -- -D warnings

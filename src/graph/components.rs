@@ -100,7 +100,7 @@ pub fn strongly_connected_components() -> Vec<(i64, i32)> {
     }
 
     // Sort SCCs by size descending, then assign IDs
-    sccs.sort_by(|a, b| b.len().cmp(&a.len()));
+    sccs.sort_by_key(|b| std::cmp::Reverse(b.len()));
 
     let mut result: Vec<(i64, i32)> = Vec::new();
     for (scc_id, scc) in sccs.iter().enumerate() {

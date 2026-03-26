@@ -33,8 +33,7 @@ pub fn pagerank(damping: f64, max_iter: i32) -> Vec<(i64, f64)> {
     let initial_score = 1.0 / n;
     let tolerance = 1e-6;
 
-    let mut scores: HashMap<i64, f64> =
-        all_nodes.iter().map(|&id| (id, initial_score)).collect();
+    let mut scores: HashMap<i64, f64> = all_nodes.iter().map(|&id| (id, initial_score)).collect();
     let mut new_scores: HashMap<i64, f64> = HashMap::with_capacity(all_nodes.len());
 
     for _ in 0..max_iter {
@@ -52,8 +51,7 @@ pub fn pagerank(damping: f64, max_iter: i32) -> Vec<(i64, f64)> {
                     sources
                         .iter()
                         .map(|&from| {
-                            let out_deg =
-                                out_edges.get(&from).map_or(1, |e| e.len().max(1)) as f64;
+                            let out_deg = out_edges.get(&from).map_or(1, |e| e.len().max(1)) as f64;
                             scores[&from] / out_deg
                         })
                         .sum()

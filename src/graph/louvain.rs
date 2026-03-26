@@ -35,7 +35,10 @@ pub fn louvain_communities() -> LouvainResult {
     // node_degree[v] = sum of edge weights incident to v
     let mut node_degree: HashMap<i64, f64> = HashMap::new();
     for &node in &nodes {
-        let deg: f64 = adj.get(&node).map(|ns| ns.iter().map(|(_, w)| w).sum()).unwrap_or(0.0);
+        let deg: f64 = adj
+            .get(&node)
+            .map(|ns| ns.iter().map(|(_, w)| w).sum())
+            .unwrap_or(0.0);
         node_degree.insert(node, deg);
     }
 
@@ -43,8 +46,7 @@ pub fn louvain_communities() -> LouvainResult {
     let node_list: Vec<i64> = nodes.iter().cloned().collect();
     let mut node_to_comm: HashMap<i64, i64> = node_list
         .iter()
-        .enumerate()
-        .map(|(_i, &id)| (id, id)) // community id = node id initially
+        .map(|&id| (id, id)) // community id = node id initially
         .collect();
 
     // community_weight[c] = sum of all edge weights inside community c (including boundary)
@@ -78,8 +80,8 @@ pub fn louvain_communities() -> LouvainResult {
 
             // Temporarily remove node from current community
             let sigma_tot_minus = sigma_tot_cur - ki;
-            let gain_remove = -(w_in_cur / total_weight)
-                + (sigma_tot_minus * ki) / (m2 * total_weight);
+            let gain_remove =
+                -(w_in_cur / total_weight) + (sigma_tot_minus * ki) / (m2 * total_weight);
 
             let mut best_gain = gain_remove; // gain from staying = 0 vs gain_remove
             let mut best_comm = cur_comm;
@@ -89,8 +91,8 @@ pub fn louvain_communities() -> LouvainResult {
                     continue;
                 }
                 let sigma_tot_cand = comm_weight[&cand_comm];
-                let gain_add = (w_in_cand / total_weight)
-                    - (sigma_tot_cand * ki) / (m2 * total_weight);
+                let gain_add =
+                    (w_in_cand / total_weight) - (sigma_tot_cand * ki) / (m2 * total_weight);
 
                 let delta = gain_add - gain_remove;
                 if delta > best_gain {
