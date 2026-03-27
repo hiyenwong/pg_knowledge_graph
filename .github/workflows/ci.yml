@@ -37,7 +37,7 @@ jobs:
             ${{ runner.os }}-pg${{ matrix.pg }}-cargo-
 
       - name: Install system dependencies (Ubuntu)
-        run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev clang libreadline-dev zlib1g-dev
 
       - name: Install cargo-pgrx
         run: cargo install cargo-pgrx --version "${{ env.CARGO_PGRX_VERSION }}" --locked
@@ -67,7 +67,7 @@ jobs:
           components: clippy, rustfmt
 
       - name: Install system dependencies (Ubuntu)
-        run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev clang libreadline-dev zlib1g-dev
 
       - name: Check formatting
         run: cargo fmt --check
