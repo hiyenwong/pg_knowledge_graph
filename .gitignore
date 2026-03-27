@@ -4,3 +4,10 @@
 *.iml
 **/*.rs.bk
 Cargo.lock
+
+# pgrx generated files
+src/bin/pgrx_embed.rs
+
+# Standalone benchmark build
+bench_standalone/target/
+bench_standalone/Cargo.lock
