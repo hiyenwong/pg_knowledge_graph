@@ -18,11 +18,11 @@
 //!
 //! // Train quantizer on sample vectors
 //! let vectors = vec![vec![0.1, 0.2, 0.3], vec![0.4, 0.5, 0.6]];
-//! let quantizer = ScalarQuantizer::train(&vectors, QuantLevel::Int8);
+//! let quantizer = ScalarQuantizer::train(&vectors, QuantLevel::Int8).unwrap();
 //!
 //! // Quantize a vector
 //! let query = vec![0.2, 0.3, 0.4];
-//! let quantized = quantizer.quantize(&query);
+//! let quantized = quantizer.quantize(&query).unwrap();
 //!
 //! // Compute approximate distance
 //! let distance = quantizer.cosine_distance(&quantized, &query);
@@ -174,8 +174,10 @@ impl ScalarQuantizer {
     ///
     /// # Example
     /// ```
+    /// use pg_knowledge_graph::quantize::{ScalarQuantizer, QuantLevel};
+    ///
     /// let vectors = vec![vec![0.1, 0.2], vec![0.3, 0.4]];
-    /// let quantizer = ScalarQuantizer::train(&vectors, QuantLevel::Int8);
+    /// let quantizer = ScalarQuantizer::train(&vectors, QuantLevel::Int8).unwrap();
     /// assert!(quantizer.is_trained());
     /// ```
     pub fn train(vectors: &[Vec<f32>], level: QuantLevel) -> Result<Self, QuantizeError> {
@@ -648,7 +650,7 @@ mod tests {
     #[test]
     fn test_quantize_int8_roundtrip() {
         let vectors: Vec<Vec<f32>> = (0..100)
-            .map(|i| (0..10).map(|j| ((i * 10 + j) as f32 / 1000.0)).collect())
+            .map(|i| (0..10).map(|j| (i * 10 + j) as f32 / 1000.0).collect())
             .collect();
 
         let q = ScalarQuantizer::train(&vectors, QuantLevel::Int8).unwrap();
