@@ -71,8 +71,12 @@ fn load_edges_with_type() -> Vec<(i64, i64, f64, String)> {
 }
 
 /// Breadth-first search from start_id up to max_depth hops.
+/// Returns empty Vec if no edges exist in the graph.
 pub fn bfs(start_id: i64, max_depth: i64) -> Vec<TraversalNode> {
     let edges = load_edges_with_type();
+    if edges.is_empty() {
+        return Vec::new(); // No edges, return empty
+    }
     let adj = build_adjacency(&edges);
 
     let mut result: Vec<TraversalNode> = Vec::new();
@@ -108,8 +112,12 @@ pub fn bfs(start_id: i64, max_depth: i64) -> Vec<TraversalNode> {
 }
 
 /// Depth-first search from start_id up to max_depth hops.
+/// Returns empty Vec if no edges exist in the graph.
 pub fn dfs(start_id: i64, max_depth: i64) -> Vec<TraversalNode> {
     let edges = load_edges_with_type();
+    if edges.is_empty() {
+        return Vec::new(); // No edges, return empty
+    }
     let adj = build_adjacency(&edges);
 
     let mut result: Vec<TraversalNode> = Vec::new();

@@ -20,35 +20,38 @@ fn kg_version() -> &'static str {
 
 #[pg_extern]
 fn kg_stats() -> pgrx::Json {
-    // Use safe queries that return 0 if table doesn't exist
-    let entity_count: i64 =
-        Spi::connect(
-            |client| match client.select("SELECT COUNT(*) FROM kg_entities", None, &[]) {
-                Ok(tup_table) => Ok::<i64, pgrx::spi::SpiError>(
-                    tup_table
-                        .first()
-                        .get_one::<i64>()
-                        .unwrap_or(Some(0))
-                        .unwrap_or(0),
-                ),
-                Err(_) => Ok::<i64, pgrx::spi::SpiError>(0),
-            },
-        )
-        .unwrap_or(0);
-
-    let relation_count: i64 = Spi::connect(|client| {
-        match client.select("SELECT COUNT(*) FROM kg_relations", None, &[]) {
-            Ok(tup_table) => Ok::<i64, pgrx::spi::SpiError>(
+    // Check if tables exist first
+    let entity_count: i64 = if graph::table_exists("kg_entities") {
+        Spi::connect(|client| {
+            let tup_table = client.select("SELECT COUNT(*) FROM kg_entities", None, &[])?;
+            Ok::<i64, pgrx::spi::SpiError>(
                 tup_table
                     .first()
                     .get_one::<i64>()
                     .unwrap_or(Some(0))
                     .unwrap_or(0),
-            ),
-            Err(_) => Ok::<i64, pgrx::spi::SpiError>(0),
-        }
-    })
-    .unwrap_or(0);
+            )
+        })
+        .unwrap_or(0)
+    } else {
+        0
+    };
+
+    let relation_count: i64 = if graph::table_exists("kg_relations") {
+        Spi::connect(|client| {
+            let tup_table = client.select("SELECT COUNT(*) FROM kg_relations", None, &[])?;
+            Ok::<i64, pgrx::spi::SpiError>(
+                tup_table
+                    .first()
+                    .get_one::<i64>()
+                    .unwrap_or(Some(0))
+                    .unwrap_or(0),
+            )
+        })
+        .unwrap_or(0)
+    } else {
+        0
+    };
 
     let density: f64 = if entity_count > 1 {
         let max_edges = entity_count * (entity_count - 1);
