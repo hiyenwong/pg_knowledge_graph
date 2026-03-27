@@ -254,11 +254,9 @@ fn kg_get_context(entity_id: i64, depth: default!(i32, 2_i32)) -> pgrx::Json {
 fn kg_quantized_search(
     query_vector: Vec<f32>,
     k: default!(i32, 10_i32),
-    level: default!(Option<&str>, None),
 ) -> SetOfIterator<'static, pgrx::Json> {
-    // Parse quantization level, default to "int8"
-    let level_str = level.unwrap_or("int8");
-    let quant_level = quantize::QuantLevel::from_str(level_str).unwrap_or_default();
+    // Default to "int8" quantization level
+    let quant_level = quantize::QuantLevel::default();
 
     // For now, fall back to regular vector search
     // Full quantized search requires pre-computed quantized embeddings
@@ -389,15 +387,13 @@ mod tests {
 
     #[pg_test]
     fn test_kg_quantized_search_empty_vector() {
-        let results: Vec<pgrx::Json> =
-            crate::kg_quantized_search(vec![], 5, Some("int8")).collect();
+        let results: Vec<pgrx::Json> = crate::kg_quantized_search(vec![], 5).collect();
         assert!(results.is_empty());
     }
 
     #[pg_test]
     fn test_kg_quantized_search_invalid_k() {
-        let results: Vec<pgrx::Json> =
-            crate::kg_quantized_search(vec![0.1; 1536], 0, Some("int8")).collect();
+        let results: Vec<pgrx::Json> = crate::kg_quantized_search(vec![0.1; 1536], 0).collect();
         assert!(results.is_empty());
     }
 
