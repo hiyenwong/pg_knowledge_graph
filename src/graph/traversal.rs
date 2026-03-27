@@ -42,6 +42,10 @@ fn build_adjacency(edges: &[(i64, i64, f64, String)]) -> HashMap<i64, Vec<(i64, 
 /// Load edges with rel_type for traversal queries.
 /// Returns empty Vec if table doesn't exist.
 fn load_edges_with_type() -> Vec<(i64, i64, f64, String)> {
+    if !crate::graph::table_exists("kg_relations") {
+        return Vec::new();
+    }
+
     pgrx::Spi::connect(|client| {
         let mut edges: Vec<(i64, i64, f64, String)> = Vec::new();
         let result = client.select(
