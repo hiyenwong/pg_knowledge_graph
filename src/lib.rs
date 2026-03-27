@@ -254,7 +254,7 @@ fn kg_get_context(entity_id: i64, depth: default!(i32, 2_i32)) -> pgrx::Json {
 fn kg_quantized_search(
     query_vector: Vec<f32>,
     k: default!(i32, 10_i32),
-    level: Option<&str>,
+    level: default!(Option<&str>, None),
 ) -> SetOfIterator<'static, pgrx::Json> {
     // Parse quantization level, default to "int8"
     let level_str = level.unwrap_or("int8");
