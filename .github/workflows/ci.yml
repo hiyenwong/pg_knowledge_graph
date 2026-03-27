@@ -47,7 +47,7 @@ jobs:
 
       - name: Install pgvector
         run: |
-          git clone --branch v0.8.0 https://github.com/pgvector/pgvector.git
+          git clone --branch v0.8.2 https://github.com/pgvector/pgvector.git
           cd pgvector
           export PG_CONFIG=~/.pgrx/${{ matrix.pg }}.*/pgrx-install/bin/pg_config
           make
@@ -80,7 +80,7 @@ jobs:
 
       - name: Install pgvector
         run: |
-          git clone --branch v0.8.0 https://github.com/pgvector/pgvector.git
+          git clone --branch v0.8.2 https://github.com/pgvector/pgvector.git
           cd pgvector
           export PG_CONFIG=~/.pgrx/18.*/pgrx-install/bin/pg_config
           make
