@@ -27,6 +27,7 @@ thiserror = "1"
 
 [dev-dependencies]
 pgrx-tests = "=0.17.0"
+rand = "0.8"
 
 [profile.dev]
 panic = "unwind"

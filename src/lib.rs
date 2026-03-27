@@ -4,6 +4,9 @@ mod graph;
 mod rag;
 mod vector;
 
+#[cfg(test)]
+mod bench;
+
 ::pgrx::pg_module_magic!();
 
 // ---------------------------------------------------------------------------
