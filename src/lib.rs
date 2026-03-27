@@ -1,7 +1,7 @@
 use pgrx::prelude::*;
 
 mod graph;
-mod quantize;
+pub mod quantize;
 mod rag;
 mod vector;
 
