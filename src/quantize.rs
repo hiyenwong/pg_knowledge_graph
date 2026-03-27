@@ -184,8 +184,8 @@ impl ScalarQuantizer {
             return Err(QuantizeError::EmptyInput);
         }
 
-        // Validate all vectors have same dimension
-        for v in vectors.iter().skip(1) {
+        // Validate all vectors have same dimension and check for NaN/Inf
+        for v in vectors.iter() {
             if v.len() != dims {
                 return Err(QuantizeError::DimensionMismatch {
                     expected: dims,
