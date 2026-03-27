@@ -407,11 +407,12 @@ mod tests {
     #[pg_test]
     fn test_quantize_level_from_str() {
         use crate::quantize::QuantLevel;
+        use std::str::FromStr;
 
-        assert_eq!(QuantLevel::from_str("int8"), Some(QuantLevel::Int8));
-        assert_eq!(QuantLevel::from_str("int4"), Some(QuantLevel::Int4));
-        assert_eq!(QuantLevel::from_str("binary"), Some(QuantLevel::Binary));
-        assert_eq!(QuantLevel::from_str("invalid"), None);
+        assert_eq!(QuantLevel::from_str("int8"), Ok(QuantLevel::Int8));
+        assert_eq!(QuantLevel::from_str("int4"), Ok(QuantLevel::Int4));
+        assert_eq!(QuantLevel::from_str("binary"), Ok(QuantLevel::Binary));
+        assert!(QuantLevel::from_str("invalid").is_err());
     }
 
     #[pg_test]
@@ -419,7 +420,7 @@ mod tests {
         use crate::quantize::{QuantLevel, ScalarQuantizer};
 
         let vectors: Vec<Vec<f32>> = (0..100)
-            .map(|i| (0..10).map(|j| ((i * 10 + j) as f32 / 1000.0)).collect())
+            .map(|i| (0..10).map(|j| (i * 10 + j) as f32 / 1000.0).collect())
             .collect();
 
         let q = ScalarQuantizer::train(&vectors, QuantLevel::Int8).unwrap();

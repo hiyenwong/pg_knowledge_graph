@@ -32,6 +32,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::str::FromStr;
 
 /// Quantization precision level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -68,14 +69,17 @@ impl QuantLevel {
     pub fn compression_ratio(&self) -> f32 {
         32.0 / self.bits_per_value() as f32
     }
+}
 
-    /// Parse from string (case-insensitive).
-    pub fn from_str(s: &str) -> Option<Self> {
+impl FromStr for QuantLevel {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "int8" | "i8" | "8bit" => Some(QuantLevel::Int8),
-            "int4" | "i4" | "4bit" => Some(QuantLevel::Int4),
-            "binary" | "bin" | "1bit" => Some(QuantLevel::Binary),
-            _ => None,
+            "int8" | "i8" | "8bit" => Ok(QuantLevel::Int8),
+            "int4" | "i4" | "4bit" => Ok(QuantLevel::Int4),
+            "binary" | "bin" | "1bit" => Ok(QuantLevel::Binary),
+            other => Err(format!("invalid quantization level: {}", other)),
         }
     }
 }
@@ -553,12 +557,14 @@ mod tests {
 
     #[test]
     fn test_quant_level_from_str() {
-        assert_eq!(QuantLevel::from_str("int8"), Some(QuantLevel::Int8));
-        assert_eq!(QuantLevel::from_str("INT8"), Some(QuantLevel::Int8));
-        assert_eq!(QuantLevel::from_str("i8"), Some(QuantLevel::Int8));
-        assert_eq!(QuantLevel::from_str("int4"), Some(QuantLevel::Int4));
-        assert_eq!(QuantLevel::from_str("binary"), Some(QuantLevel::Binary));
-        assert_eq!(QuantLevel::from_str("invalid"), None);
+        use std::str::FromStr;
+
+        assert_eq!(QuantLevel::from_str("int8"), Ok(QuantLevel::Int8));
+        assert_eq!(QuantLevel::from_str("INT8"), Ok(QuantLevel::Int8));
+        assert_eq!(QuantLevel::from_str("i8"), Ok(QuantLevel::Int8));
+        assert_eq!(QuantLevel::from_str("int4"), Ok(QuantLevel::Int4));
+        assert_eq!(QuantLevel::from_str("binary"), Ok(QuantLevel::Binary));
+        assert!(QuantLevel::from_str("invalid").is_err());
     }
 
     #[test]
