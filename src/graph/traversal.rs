@@ -40,22 +40,28 @@ fn build_adjacency(edges: &[(i64, i64, f64, String)]) -> HashMap<i64, Vec<(i64, 
 }
 
 /// Load edges with rel_type for traversal queries.
+/// Returns empty Vec if table doesn't exist.
 fn load_edges_with_type() -> Vec<(i64, i64, f64, String)> {
     pgrx::Spi::connect(|client| {
         let mut edges: Vec<(i64, i64, f64, String)> = Vec::new();
-        let tup_table = client.select(
+        let result = client.select(
             "SELECT source_id, target_id, weight, rel_type FROM kg_relations",
             None,
             &[],
-        )?;
-        for row in tup_table {
-            let src: i64 = row["source_id"].value::<i64>()?.unwrap_or(0);
-            let tgt: i64 = row["target_id"].value::<i64>()?.unwrap_or(0);
-            let wgt: f64 = row["weight"].value::<f64>()?.unwrap_or(1.0);
-            let rt: String = row["rel_type"].value::<String>()?.unwrap_or_default();
-            edges.push((src, tgt, wgt, rt));
+        );
+        match result {
+            Ok(tup_table) => {
+                for row in tup_table {
+                    let src: i64 = row["source_id"].value::<i64>()?.unwrap_or(0);
+                    let tgt: i64 = row["target_id"].value::<i64>()?.unwrap_or(0);
+                    let wgt: f64 = row["weight"].value::<f64>()?.unwrap_or(1.0);
+                    let rt: String = row["rel_type"].value::<String>()?.unwrap_or_default();
+                    edges.push((src, tgt, wgt, rt));
+                }
+                Ok::<Vec<(i64, i64, f64, String)>, pgrx::spi::SpiError>(edges)
+            }
+            Err(_) => Ok::<Vec<(i64, i64, f64, String)>, pgrx::spi::SpiError>(Vec::new()), // Table doesn't exist
         }
-        Ok::<Vec<(i64, i64, f64, String)>, pgrx::spi::SpiError>(edges)
     })
     .unwrap_or_default()
 }

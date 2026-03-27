@@ -20,12 +20,36 @@ fn kg_version() -> &'static str {
 
 #[pg_extern]
 fn kg_stats() -> pgrx::Json {
-    let entity_count: i64 = Spi::get_one("SELECT COUNT(*) FROM kg_entities")
-        .unwrap_or(Some(0))
+    // Use safe queries that return 0 if table doesn't exist
+    let entity_count: i64 =
+        Spi::connect(
+            |client| match client.select("SELECT COUNT(*) FROM kg_entities", None, &[]) {
+                Ok(tup_table) => Ok::<i64, pgrx::spi::SpiError>(
+                    tup_table
+                        .first()
+                        .get_one::<i64>()
+                        .unwrap_or(Some(0))
+                        .unwrap_or(0),
+                ),
+                Err(_) => Ok::<i64, pgrx::spi::SpiError>(0),
+            },
+        )
         .unwrap_or(0);
-    let relation_count: i64 = Spi::get_one("SELECT COUNT(*) FROM kg_relations")
-        .unwrap_or(Some(0))
-        .unwrap_or(0);
+
+    let relation_count: i64 = Spi::connect(|client| {
+        match client.select("SELECT COUNT(*) FROM kg_relations", None, &[]) {
+            Ok(tup_table) => Ok::<i64, pgrx::spi::SpiError>(
+                tup_table
+                    .first()
+                    .get_one::<i64>()
+                    .unwrap_or(Some(0))
+                    .unwrap_or(0),
+            ),
+            Err(_) => Ok::<i64, pgrx::spi::SpiError>(0),
+        }
+    })
+    .unwrap_or(0);
+
     let density: f64 = if entity_count > 1 {
         let max_edges = entity_count * (entity_count - 1);
         relation_count as f64 / max_edges as f64

@@ -53,23 +53,28 @@ pub fn semantic_search(query_vector: Vec<f32>, k: i32) -> Vec<VectorSearchResult
 
     Spi::connect(|client| {
         let mut results: Vec<VectorSearchResult> = Vec::new();
-        let tup_table = client.select(&query, None, &[])?;
+        let result = client.select(&query, None, &[]);
 
-        for row in tup_table {
-            let entity_id: i64 = row["id"].value::<i64>()?.unwrap_or(0);
-            let entity_name: String = row["name"].value::<String>()?.unwrap_or_default();
-            let entity_type: String = row["entity_type"].value::<String>()?.unwrap_or_default();
-            let similarity: f64 = row["similarity"].value::<f64>()?.unwrap_or(0.0);
+        match result {
+            Ok(tup_table) => {
+                for row in tup_table {
+                    let entity_id: i64 = row["id"].value::<i64>()?.unwrap_or(0);
+                    let entity_name: String = row["name"].value::<String>()?.unwrap_or_default();
+                    let entity_type: String =
+                        row["entity_type"].value::<String>()?.unwrap_or_default();
+                    let similarity: f64 = row["similarity"].value::<f64>()?.unwrap_or(0.0);
 
-            results.push(VectorSearchResult {
-                entity_id,
-                entity_name,
-                entity_type,
-                similarity,
-            });
+                    results.push(VectorSearchResult {
+                        entity_id,
+                        entity_name,
+                        entity_type,
+                        similarity,
+                    });
+                }
+                Ok::<Vec<VectorSearchResult>, pgrx::spi::SpiError>(results)
+            }
+            Err(_) => Ok::<Vec<VectorSearchResult>, pgrx::spi::SpiError>(Vec::new()), // Table doesn't exist
         }
-
-        Ok::<Vec<VectorSearchResult>, pgrx::spi::SpiError>(results)
     })
     .unwrap_or_default()
 }
