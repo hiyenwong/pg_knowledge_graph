@@ -30,16 +30,32 @@ PostgreSQL extension that adds **graph algorithm capabilities** to complement pg
 
 | Function | Description |
 |---|---|
-| `kg_quantized_search(query_vector, k)` | Fast approximate search with Int8 quantization |
+| `kg_quantized_search(query_vector, k, level)` | Fast approximate search with configurable quantization level (default `'int8'`) |
 | `kg_quantize_info()` | Returns available quantization levels and compression ratios |
 
 **Quantization Levels:**
 
-| Level | Compression | Speedup | Recall Loss |
-|-------|-------------|---------|-------------|
-| Int8  | 4x          | 2-3x    | ~0%         |
-| Int4  | 8x          | 4-6x    | ~2%         |
-| Binary| 32x         | 8-10x   | ~5%         |
+| Level | Compression | Recall Loss | Notes |
+|-------|-------------|-------------|-------|
+| `int8` | 4x | ~0% | Default; near-lossless |
+| `int4` | 8x | ~2% | Good balance |
+| `binary` | 32x | ~5% | Maximum compression |
+
+**TurboQuant Algorithm (based on [arXiv:2504.19874](https://arxiv.org/abs/2504.19874)):**
+
+1. **L2-normalize + √d scale** — coordinates become approximately N(0,1), satisfying the Gaussian optimality assumption for Lloyd-Max quantization
+2. **Random sign flip** (xorshift64 PRNG) — lightweight dimension decorrelation (SRHT diagonal matrix D), O(d) storage vs O(d²) for full rotation
+3. **Gaussian-optimal Lloyd-Max codebook** — data-independent; no training data required
+4. **Two-stage QJL residual** — after main quantization, a 1-bit Quantized Johnson-Lindenstrauss projection of the residual `e = original − decode(main)` is stored:
+   ```
+   qjl_bit = sign(r · e)           # 1 bit
+   residual_norm = ‖e‖₂            # 4 bytes (f32)
+   ```
+   At query time the correction `qjl_bit × ‖e‖ × (r·y / ‖r‖) × √(2/π)` is added to the main dot product, making the inner product estimate **unbiased** (+QJL applied to Int8/Int4 only)
+5. **SIMD-accelerated fused decode+dot** — no intermediate `Vec<f32>` allocation; `#[target_feature]` enables auto-vectorisation:
+   - ARM64: NEON (always available on ARMv8-A)
+   - x86_64: AVX2 + FMA (runtime-detected via `is_x86_feature_detected!`)
+   - Other: scalar fallback
 
 ## Requirements
 
@@ -95,8 +111,14 @@ SELECT * FROM kg_vector_search('[0.1, 0.2, ...]'::vector, 10);
 -- Hybrid search (vector + graph structure)
 SELECT * FROM kg_hybrid_search('[0.1, 0.2, ...]'::vector, 10, 2, 0.7, 0.3);
 
--- Quantized search (faster, approximate)
+-- Quantized search (faster, approximate) — default int8
 SELECT * FROM kg_quantized_search('[0.1, 0.2, ...]'::vector, 10);
+
+-- Quantized search with explicit level
+SELECT * FROM kg_quantized_search('[0.1, 0.2, ...]'::vector, 10, 'int4');
+
+-- View available quantization levels
+SELECT kg_quantize_info();
 ```
 
 ## Development
@@ -122,7 +144,7 @@ cargo fmt
 ```
 src/
 ├── lib.rs                  # #[pg_extern] entry points for all SQL functions
-├── quantize.rs             # TurboQuant scalar quantization (Int8/Int4/Binary)
+├── quantize.rs             # TurboQuant: Lloyd-Max codebook, two-stage QJL, SIMD decode+dot
 ├── graph/
 │   ├── mod.rs              # Shared SPI helpers (load_edges, load_entity_ids)
 │   ├── traversal.rs        # BFS, DFS, shortest path
@@ -144,7 +166,7 @@ Data layer is accessed entirely via `pgrx::Spi` — no external database drivers
 | Phase 1 | ✅ Complete | Schema DDL, version, stats, CI setup |
 | Phase 2 | ✅ Complete | Graph algorithms (BFS/DFS, PageRank, Louvain, SCC) |
 | Phase 3 | ✅ Complete | pgvector integration, hybrid search, RAG context |
-| Phase 4 | ✅ Complete | TurboQuant vector quantization (Int8/Int4/Binary) |
+| Phase 4 | ✅ Complete | TurboQuant quantization: Lloyd-Max codebook, two-stage QJL residual, SIMD decode+dot |
 
 ## License
 

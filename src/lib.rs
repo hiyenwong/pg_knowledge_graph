@@ -239,28 +239,34 @@ fn kg_get_context(entity_id: i64, depth: default!(i32, 2_i32)) -> pgrx::Json {
 // Phase 4 – Vector Quantization (TurboQuant)
 // ---------------------------------------------------------------------------
 
-/// Quantized vector search using TurboQuant compression.
+/// Quantized vector search using scalar quantization (TurboQuant-style).
 ///
-/// Faster approximate search with configurable precision/speed tradeoff.
+/// Loads all entity embeddings, trains a per-dimension scalar quantizer,
+/// then ranks results by approximate cosine similarity computed with
+/// quantized arithmetic — faster than float32 brute-force for large corpora.
 ///
 /// # Arguments
 /// * `query_vector` - Query embedding vector
 /// * `k` - Number of results to return (default: 10)
-/// * `level` - Quantization level: "int8", "int4", or "binary" (default: "int8")
+/// * `level` - Quantization level: "int8" (4x, ~0% loss), "int4" (8x, ~2% loss),
+///             or "binary" (32x, ~5% loss). Default: "int8"
 ///
 /// # Returns
-/// SETOF JSON rows with entity info and similarity score
+/// SETOF JSON rows with entity_id, entity_name, entity_type, similarity,
+/// quantization_level, compression_ratio
 #[pg_extern]
 fn kg_quantized_search(
     query_vector: Vec<f32>,
     k: default!(i32, 10_i32),
+    level: default!(&str, "'int8'"),
 ) -> SetOfIterator<'static, pgrx::Json> {
-    // Default to "int8" quantization level
-    let quant_level = quantize::QuantLevel::default();
+    use std::str::FromStr;
 
-    // For now, fall back to regular vector search
-    // Full quantized search requires pre-computed quantized embeddings
-    let results = vector::semantic_search(query_vector, k);
+    let quant_level = quantize::QuantLevel::from_str(level).unwrap_or_default();
+    let compression_ratio = quant_level.compression_ratio();
+    let level_str = quant_level.to_string();
+
+    let results = vector::quantized_search(query_vector, k, quant_level);
     let rows: Vec<pgrx::Json> = results
         .into_iter()
         .map(|r| {
@@ -269,7 +275,8 @@ fn kg_quantized_search(
                 "entity_name": r.entity_name,
                 "entity_type": r.entity_type,
                 "similarity": r.similarity,
-                "quantization_level": quant_level.to_string(),
+                "quantization_level": level_str,
+                "compression_ratio": compression_ratio,
             }))
         })
         .collect();
@@ -387,13 +394,32 @@ mod tests {
 
     #[pg_test]
     fn test_kg_quantized_search_empty_vector() {
-        let results: Vec<pgrx::Json> = crate::kg_quantized_search(vec![], 5).collect();
+        let results: Vec<pgrx::Json> = crate::kg_quantized_search(vec![], 5, "int8").collect();
         assert!(results.is_empty());
     }
 
     #[pg_test]
     fn test_kg_quantized_search_invalid_k() {
-        let results: Vec<pgrx::Json> = crate::kg_quantized_search(vec![0.1; 1536], 0).collect();
+        let results: Vec<pgrx::Json> =
+            crate::kg_quantized_search(vec![0.1; 1536], 0, "int8").collect();
+        assert!(results.is_empty());
+    }
+
+    #[pg_test]
+    fn test_kg_quantized_search_levels() {
+        // No data → all levels return empty, but should not panic
+        for level in &["int8", "int4", "binary"] {
+            let results: Vec<pgrx::Json> =
+                crate::kg_quantized_search(vec![0.1; 4], 5, level).collect();
+            assert!(results.is_empty());
+        }
+    }
+
+    #[pg_test]
+    fn test_kg_quantized_search_invalid_level_fallback() {
+        // Invalid level falls back to Int8 default
+        let results: Vec<pgrx::Json> =
+            crate::kg_quantized_search(vec![0.1; 4], 5, "unknown").collect();
         assert!(results.is_empty());
     }
 

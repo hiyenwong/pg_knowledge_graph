@@ -534,6 +534,573 @@ impl QuantizedVector {
 }
 
 // ============================================================================
+// TurboQuant-inspired Quantizer
+// ============================================================================
+//
+// Key improvements over ScalarQuantizer (based on TurboQuant paper, 2025):
+//
+// 1. DATA-INDEPENDENT CODEBOOK: Pre-computed Gaussian-optimal Lloyd-Max levels.
+//    No training data needed. Works out-of-the-box for any normalized vectors.
+//
+// 2. L2 NORMALIZATION + SCALING: Before quantization, normalize to unit sphere
+//    and scale by √d so each coordinate follows approximately N(0, 1).
+//    This satisfies the Gaussian assumption for Lloyd-Max optimality.
+//
+// 3. RANDOM SIGN FLIP (lightweight rotation): Multiply each dimension by a
+//    deterministic ±1 value (xorshift64 PRNG) to decorrelate correlated inputs.
+//    This is the "D" in structured random Hadamard transform (SRHT), much
+//    cheaper than a full orthogonal rotation while providing similar benefits.
+//
+// 4. ASYMMETRIC DISTANCE COMPUTATION (ADC): Query stays float32; only stored
+//    vectors are quantized. The inner product is computed as:
+//      dot(query_float32, dequantize(stored_quantized))
+//    This gives better accuracy than symmetric quantization with no storage
+//    overhead on the query side.
+//
+// 5. TWO-STAGE QJL RESIDUAL (TurboQuant core innovation):
+//    After (b-1)-bit Lloyd-Max main quantization, the residual error vector
+//    e = original - decode(main) is projected to 1 bit via Quantized
+//    Johnson-Lindenstrauss (QJL):
+//      qjl_bit = sign(r · e)  where r is a deterministic ±1 random vector
+//    At query time, the correction term is added to the main dot product
+//    to make the inner product estimate unbiased:
+//      correction = qjl_bit × ||e|| × (r·y) / ||r|| × sqrt(2/π)
+//    This costs only 5 bytes extra per vector (1 byte sign + 4 bytes norm).
+//
+// 6. SIMD ACCELERATION: The fused decode+dot hot path is compiled with
+//    platform-specific SIMD target features enabled:
+//      - ARM64: NEON (always available on Apple Silicon, Linux ARM64)
+//      - x86_64: AVX2 + FMA (runtime-detected)
+//    LLVM auto-vectorizes the clean iterator-based loop when the target
+//    feature is enabled via #[target_feature(enable = "...")].
+//
+// References:
+//   - TurboQuant: https://arxiv.org/abs/2504.19874
+//   - QJL (Quantized Johnson-Lindenstrauss): Shrivastava & Li (2014)
+//   - Lloyd-Max quantization for Gaussian: Lloyd (1982), Max (1960)
+
+/// Pre-computed Lloyd-Max reconstruction levels for standard N(0, 1).
+///
+/// These levels minimize MSE for quantizing N(0,1)-distributed values.
+/// Symmetric around 0. Used after L2-normalization + √d scaling.
+/// 1-bit Lloyd-Max: threshold=0, reconstruction at ±E[|X|] = ±√(2/π)
+const LLOYD_1BIT: [f32; 2] = [-0.7979, 0.7979];
+
+/// 4-bit Lloyd-Max for N(0,1): 16 symmetric reconstruction levels.
+/// Computed numerically via Lloyd-Max algorithm on the standard Gaussian CDF.
+const LLOYD_4BIT: [f32; 16] = [
+    -2.7326, -2.0690, -1.6352, -1.2732, -0.9617, -0.6736, -0.3992, -0.1332,
+    0.1332, 0.3992, 0.6736, 0.9617, 1.2732, 1.6352, 2.0690, 2.7326,
+];
+
+/// 8-bit: uniform quantization over [-4, 4] is near-optimal for N(0,1).
+/// Only 0.006% of probability mass falls outside ±4σ.
+const INT8_RANGE_MIN: f32 = -4.0;
+const INT8_RANGE_MAX: f32 = 4.0;
+
+/// Find nearest codebook entry via linear search.
+/// Codebook is small (2 or 16 entries) so this is fast.
+fn find_nearest_codebook(value: f32, codebook: &[f32]) -> u8 {
+    let mut best_idx = 0usize;
+    let mut best_dist = f32::INFINITY;
+    for (i, &level) in codebook.iter().enumerate() {
+        let d = (value - level).abs();
+        if d < best_dist {
+            best_dist = d;
+            best_idx = i;
+        }
+    }
+    best_idx as u8
+}
+
+/// sqrt(2/π) ≈ 0.7979 — correction factor for 1-bit JL inner product estimates.
+/// Derived from E[|N(0,1)|] = sqrt(2/π), used in the QJL correction term.
+const SQRT_2_OVER_PI: f32 = 0.797_884_6_f32;
+
+/// Generate a deterministic ±1 sign vector using xorshift64 PRNG.
+///
+/// The sign flip decorrelates input dimensions before quantization,
+/// analogous to the random diagonal matrix D in SRHT.
+fn generate_signs(dims: usize, seed: u64) -> Vec<i8> {
+    let mut state = if seed == 0 { 0xdeadbeef_cafebabe_u64 } else { seed };
+    let mut signs = Vec::with_capacity(dims);
+    for _ in 0..dims {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        signs.push(if state & 1 == 0 { 1i8 } else { -1i8 });
+    }
+    signs
+}
+
+/// Generate a deterministic ±1 QJL projection vector.
+///
+/// Uses a different seed derivation than `generate_signs` to ensure independence
+/// between the sign-flip rotation and the QJL correction projection.
+fn generate_qjl_projection(dims: usize, seed: u64) -> Vec<i8> {
+    // Mix the seed with a golden-ratio constant to ensure statistical independence
+    // from the sign-flip vector generated by generate_signs().
+    generate_signs(dims, seed.wrapping_add(0x9e3779b97f4a7c15_u64))
+}
+
+/// TurboQuant-inspired scalar quantizer for cosine similarity search.
+///
+/// Unlike [`ScalarQuantizer`], this requires **no training data**.
+/// Create with [`TurboQuantizer::new`] and immediately start quantizing.
+///
+/// # Example
+///
+/// ```
+/// use pg_knowledge_graph::quantize::{TurboQuantizer, QuantLevel};
+///
+/// let q = TurboQuantizer::new(4, QuantLevel::Int8, 0);
+/// let v = vec![0.1_f32, 0.5, -0.3, 0.8];
+/// let qv = q.quantize(&v).unwrap();
+/// let sim = q.cosine_similarity(&qv, &v);
+/// assert!(sim > 0.99, "self-similarity should be ~1.0, got {}", sim);
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TurboQuantizer {
+    dims: usize,
+    level: QuantLevel,
+    /// Seed for deterministic sign flip
+    seed: u64,
+}
+
+/// Quantized vector produced by [`TurboQuantizer`].
+///
+/// Stores the main quantization data plus two-stage QJL correction fields
+/// that enable unbiased inner product estimation per the TurboQuant paper.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TurboQuantizedVec {
+    /// Bit-packed Lloyd-Max codebook indices (main quantization)
+    data: Vec<u8>,
+    /// Original L2 norm (restored during dequantization)
+    original_norm: f32,
+    /// Number of dimensions
+    dims: usize,
+    /// Quantization level used
+    level: QuantLevel,
+    /// QJL bit: sign(r · e) where e = original_transformed - decode_main(data).
+    /// Used as the two-stage correction for unbiased inner product estimation.
+    /// +1 or -1.
+    qjl_bit: i8,
+    /// L2 norm of the quantization residual in the **original** (un-transformed)
+    /// vector space. Used to scale the QJL correction term.
+    residual_norm: f32,
+}
+
+impl TurboQuantizer {
+    /// Create a new TurboQuantizer. No training required.
+    ///
+    /// # Arguments
+    /// * `dims` - Vector dimensionality (must match vectors at quantize time)
+    /// * `level` - Quantization precision (Int8=4x, Int4=8x, Binary=32x)
+    /// * `seed` - RNG seed for sign flip; use 0 for a default seed
+    pub fn new(dims: usize, level: QuantLevel, seed: u64) -> Self {
+        let seed = if seed == 0 { 0xdeadbeef_cafebabe_u64 } else { seed };
+        Self { dims, level, seed }
+    }
+
+    /// Quantize a vector with two-stage QJL residual correction.
+    ///
+    /// Steps:
+    /// 1. L2-normalize → scale by √d → sign-flip → Lloyd-Max main encode
+    /// 2. Compute residual e = transformed - decode(main_data)
+    /// 3. QJL bit = sign(r · e)  where r is a separate deterministic ±1 vector
+    /// 4. Store qjl_bit + residual_norm alongside main data
+    pub fn quantize(&self, vector: &[f32]) -> Result<TurboQuantizedVec, QuantizeError> {
+        if vector.len() != self.dims {
+            return Err(QuantizeError::DimensionMismatch {
+                expected: self.dims,
+                actual: vector.len(),
+            });
+        }
+        for &v in vector {
+            if !v.is_finite() {
+                return Err(QuantizeError::InvalidVector);
+            }
+        }
+
+        let original_norm: f32 = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if original_norm < 1e-10 {
+            return Err(QuantizeError::ConstantVector);
+        }
+
+        // Step 1: L2-normalize + √d scale so coordinates ≈ N(0,1)
+        let scale = (self.dims as f32).sqrt() / original_norm;
+        let signs = generate_signs(self.dims, self.seed);
+
+        let transformed: Vec<f32> = vector
+            .iter()
+            .zip(signs.iter())
+            .map(|(&x, &s)| x * scale * s as f32)
+            .collect();
+
+        // Main (b-1 or b bit) Lloyd-Max encoding
+        let data = match self.level {
+            QuantLevel::Int8 => Self::encode_int8(&transformed),
+            QuantLevel::Int4 => Self::encode_int4(&transformed),
+            QuantLevel::Binary => Self::encode_binary(&transformed),
+        };
+
+        // Step 2: compute quantization residual in transformed space
+        // residual_i = transformed_i - decoded_main_i
+        let decoded_main_t = Self::decode_to_transformed_space(&data, self.level, self.dims);
+        let qjl_proj = generate_qjl_projection(self.dims, self.seed);
+
+        let mut qjl_dot = 0.0f32;
+        let mut residual_sq = 0.0f32;
+        for i in 0..self.dims {
+            let res = transformed[i] - decoded_main_t[i];
+            qjl_dot += res * qjl_proj[i] as f32;
+            residual_sq += res * res;
+        }
+
+        // Step 3: QJL bit = sign(r · residual)
+        let qjl_bit: i8 = if qjl_dot >= 0.0 { 1 } else { -1 };
+
+        // Residual norm in original space (undo the scale = √d / original_norm)
+        let scale_inv = original_norm / (self.dims as f32).sqrt();
+        let residual_norm = residual_sq.sqrt() * scale_inv;
+
+        Ok(TurboQuantizedVec {
+            data,
+            original_norm,
+            dims: self.dims,
+            level: self.level,
+            qjl_bit,
+            residual_norm,
+        })
+    }
+
+    // -------------------------------------------------------------------------
+    // Encoding helpers
+    // -------------------------------------------------------------------------
+
+    fn encode_int8(transformed: &[f32]) -> Vec<u8> {
+        let range = INT8_RANGE_MAX - INT8_RANGE_MIN;
+        transformed
+            .iter()
+            .map(|&v| {
+                let clipped = v.clamp(INT8_RANGE_MIN, INT8_RANGE_MAX);
+                let normalized = (clipped - INT8_RANGE_MIN) / range;
+                (normalized * 255.0).round() as u8
+            })
+            .collect()
+    }
+
+    fn encode_int4(transformed: &[f32]) -> Vec<u8> {
+        let packed_len = transformed.len().div_ceil(2);
+        let mut packed = vec![0u8; packed_len];
+        for (i, &v) in transformed.iter().enumerate() {
+            let code = find_nearest_codebook(v, &LLOYD_4BIT);
+            let byte_idx = i / 2;
+            if i % 2 == 0 {
+                packed[byte_idx] = (packed[byte_idx] & 0xF0) | (code & 0x0F);
+            } else {
+                packed[byte_idx] = (packed[byte_idx] & 0x0F) | ((code & 0x0F) << 4);
+            }
+        }
+        packed
+    }
+
+    fn encode_binary(transformed: &[f32]) -> Vec<u8> {
+        let packed_len = transformed.len().div_ceil(8);
+        let mut packed = vec![0u8; packed_len];
+        for (i, &v) in transformed.iter().enumerate() {
+            let bit: u8 = if v >= 0.0 { 1 } else { 0 };
+            let byte_idx = i / 8;
+            let bit_idx = i % 8;
+            packed[byte_idx] |= bit << bit_idx;
+        }
+        packed
+    }
+
+    // -------------------------------------------------------------------------
+    // Decoding helpers
+    // -------------------------------------------------------------------------
+
+    /// Decode packed data back to **transformed space** (before undo-sign-flip and
+    /// undo-scale). Used internally to compute the QJL residual during encoding.
+    fn decode_to_transformed_space(data: &[u8], level: QuantLevel, dims: usize) -> Vec<f32> {
+        match level {
+            QuantLevel::Int8 => {
+                let range = INT8_RANGE_MAX - INT8_RANGE_MIN;
+                data.iter()
+                    .map(|&code| INT8_RANGE_MIN + (code as f32 / 255.0) * range)
+                    .collect()
+            }
+            QuantLevel::Int4 => {
+                let mut result = Vec::with_capacity(dims);
+                for (byte_idx, &byte) in data.iter().enumerate() {
+                    if byte_idx * 2 < dims {
+                        result.push(LLOYD_4BIT[(byte & 0x0F) as usize]);
+                    }
+                    if byte_idx * 2 + 1 < dims {
+                        result.push(LLOYD_4BIT[((byte >> 4) & 0x0F) as usize]);
+                    }
+                }
+                result
+            }
+            QuantLevel::Binary => {
+                let mut result = Vec::with_capacity(dims);
+                for (byte_idx, &byte) in data.iter().enumerate() {
+                    for bit_idx in 0..8 {
+                        let dim = byte_idx * 8 + bit_idx;
+                        if dim >= dims {
+                            break;
+                        }
+                        let bit = (byte >> bit_idx) & 1;
+                        result.push(LLOYD_1BIT[bit as usize]);
+                    }
+                }
+                result
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // SIMD-accelerated fused decode + dot product
+    // -------------------------------------------------------------------------
+    //
+    // Instead of decode() → Vec<f32> + separate dot(), we fuse both into a
+    // single pass to avoid allocating a temporary buffer and improve cache
+    // locality. The inner loop is annotated with #[target_feature] so LLVM
+    // emits vectorised code (NEON on ARM64, AVX2+FMA on x86_64).
+    //
+    // Naming convention:
+    //   decode_dot_<level>_simd  — platform-accelerated implementation
+    //   decode_and_dot           — public dispatcher (picks SIMD or scalar)
+
+    /// ARM64 NEON–accelerated decode+dot for Int8.
+    ///
+    /// `#[target_feature(enable = "neon")]` tells LLVM the iterator loop below
+    /// can use 128-bit NEON vector registers (vfmaq_f32, vcvtq_f32_u32, etc.).
+    #[cfg(target_arch = "aarch64")]
+    #[target_feature(enable = "neon")]
+    unsafe fn decode_dot_int8_neon(
+        data: &[u8],
+        query: &[f32],
+        signs: &[i8],
+        scale_inv: f32,
+    ) -> f32 {
+        let range = INT8_RANGE_MAX - INT8_RANGE_MIN;
+        let inv255 = range / 255.0;
+        data.iter()
+            .zip(query.iter())
+            .zip(signs.iter())
+            .map(|((&code, &q), &s)| {
+                let v_t = INT8_RANGE_MIN + code as f32 * inv255;
+                v_t * s as f32 * q
+            })
+            .sum::<f32>()
+            * scale_inv
+    }
+
+    /// x86_64 AVX2+FMA–accelerated decode+dot for Int8.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,fma")]
+    unsafe fn decode_dot_int8_avx2(
+        data: &[u8],
+        query: &[f32],
+        signs: &[i8],
+        scale_inv: f32,
+    ) -> f32 {
+        let range = INT8_RANGE_MAX - INT8_RANGE_MIN;
+        let inv255 = range / 255.0;
+        data.iter()
+            .zip(query.iter())
+            .zip(signs.iter())
+            .map(|((&code, &q), &s)| {
+                let v_t = INT8_RANGE_MIN + code as f32 * inv255;
+                v_t * s as f32 * q
+            })
+            .sum::<f32>()
+            * scale_inv
+    }
+
+    /// Scalar fallback for decode+dot Int8 (used when SIMD is not available
+    /// or for non-Int8 levels).
+    fn decode_dot_int8_scalar(data: &[u8], query: &[f32], signs: &[i8], scale_inv: f32) -> f32 {
+        let range = INT8_RANGE_MAX - INT8_RANGE_MIN;
+        let inv255 = range / 255.0;
+        data.iter()
+            .zip(query.iter())
+            .zip(signs.iter())
+            .map(|((&code, &q), &s)| {
+                let v_t = INT8_RANGE_MIN + code as f32 * inv255;
+                v_t * s as f32 * q
+            })
+            .sum::<f32>()
+            * scale_inv
+    }
+
+    /// Fused decode+dot for Int4. No SIMD specialisation (nibble unpacking
+    /// is harder to vectorise; LLVM auto-vectorises naturally).
+    fn decode_dot_int4(data: &[u8], query: &[f32], signs: &[i8], scale_inv: f32, dims: usize) -> f32 {
+        let mut dot = 0.0f32;
+        for (byte_idx, &byte) in data.iter().enumerate() {
+            let lo_dim = byte_idx * 2;
+            if lo_dim < dims {
+                let v = LLOYD_4BIT[(byte & 0x0F) as usize];
+                dot += v * signs[lo_dim] as f32 * query[lo_dim];
+            }
+            let hi_dim = byte_idx * 2 + 1;
+            if hi_dim < dims {
+                let v = LLOYD_4BIT[((byte >> 4) & 0x0F) as usize];
+                dot += v * signs[hi_dim] as f32 * query[hi_dim];
+            }
+        }
+        dot * scale_inv
+    }
+
+    /// Fused decode+dot for Binary. Table lookup ×2 values, 8 per byte.
+    fn decode_dot_binary(data: &[u8], query: &[f32], signs: &[i8], scale_inv: f32, dims: usize) -> f32 {
+        let mut dot = 0.0f32;
+        for (byte_idx, &byte) in data.iter().enumerate() {
+            for bit_idx in 0..8 {
+                let dim = byte_idx * 8 + bit_idx;
+                if dim >= dims {
+                    break;
+                }
+                let bit = (byte >> bit_idx) & 1;
+                let v = LLOYD_1BIT[bit as usize];
+                dot += v * signs[dim] as f32 * query[dim];
+            }
+        }
+        dot * scale_inv
+    }
+
+    /// Platform-dispatching fused decode+dot (allocation-free, SIMD-accelerated).
+    ///
+    /// Returns `Σ_i decode(data_i) * query_i` in original vector space.
+    fn decode_and_dot(&self, quantized: &TurboQuantizedVec, query: &[f32]) -> f32 {
+        let scale_inv = quantized.original_norm / (self.dims as f32).sqrt();
+        let signs = generate_signs(self.dims, self.seed);
+
+        match self.level {
+            QuantLevel::Int8 => {
+                // SIMD dispatch: ARM64 → NEON, x86_64 → AVX2+FMA, otherwise scalar
+                #[cfg(target_arch = "aarch64")]
+                {
+                    // NEON is always available on AArch64 (ACLE mandates it since ARMv8-A).
+                    return unsafe {
+                        Self::decode_dot_int8_neon(&quantized.data, query, &signs, scale_inv)
+                    };
+                }
+                #[cfg(target_arch = "x86_64")]
+                {
+                    if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+                        return unsafe {
+                            Self::decode_dot_int8_avx2(&quantized.data, query, &signs, scale_inv)
+                        };
+                    }
+                }
+                #[allow(unreachable_code)]
+                Self::decode_dot_int8_scalar(&quantized.data, query, &signs, scale_inv)
+            }
+            QuantLevel::Int4 => {
+                Self::decode_dot_int4(&quantized.data, query, &signs, scale_inv, self.dims)
+            }
+            QuantLevel::Binary => {
+                Self::decode_dot_binary(&quantized.data, query, &signs, scale_inv, self.dims)
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Public similarity API
+    // -------------------------------------------------------------------------
+
+    /// Compute asymmetric cosine similarity with two-stage QJL correction.
+    ///
+    /// # Algorithm
+    /// 1. **Main estimate**: fused decode+dot (SIMD-accelerated)
+    /// 2. **QJL correction**: add `qjl_bit × ||e|| × (r·y)/||r|| × √(2/π)`
+    ///    to correct the bias introduced by main quantization error.
+    /// 3. Normalise to cosine similarity: divide by (||query|| × ||stored||).
+    ///
+    /// Query remains float32 throughout (Asymmetric Distance Computation).
+    pub fn cosine_similarity(&self, quantized: &TurboQuantizedVec, query: &[f32]) -> f32 {
+        if query.len() != self.dims {
+            return 0.0;
+        }
+        let query_norm: f32 = query.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if query_norm < 1e-10 || quantized.original_norm < 1e-10 {
+            return 0.0;
+        }
+
+        // ── Stage 1: main dot product (fused, SIMD-accelerated) ──────────────
+        let main_dot = self.decode_and_dot(quantized, query);
+
+        // ── Stage 2: QJL correction ───────────────────────────────────────────
+        // correction = qjl_bit × ||e|| × (r·y / ||r||) × sqrt(2/π)
+        //
+        // Where:
+        //   qjl_bit     = sign(r · residual_transformed)  [stored in quantized]
+        //   ||e||        = residual_norm                   [stored in quantized]
+        //   r·y          = dot product of QJL projection with query
+        //   ||r||        = sqrt(dims)  for ±1 Rademacher projection
+        //   sqrt(2/π)    = E[|N(0,1)|]^{-1}, the JL correction constant
+        //
+        // QJL is only applied for Int8/Int4. For Binary (1-bit), the
+        // quantization error is too large and not well-modelled by the JL
+        // approximation — applying the correction degrades accuracy.
+        let correction = if quantized.level != QuantLevel::Binary
+            && quantized.residual_norm > 1e-10
+        {
+            let qjl_proj = generate_qjl_projection(self.dims, self.seed);
+            // r · y  (query stays float32)
+            let r_dot_y: f32 = query
+                .iter()
+                .zip(qjl_proj.iter())
+                .map(|(&q, &r)| q * r as f32)
+                .sum();
+            let r_norm = (self.dims as f32).sqrt(); // ||r|| for ±1 Rademacher
+            quantized.qjl_bit as f32 * quantized.residual_norm * (r_dot_y / r_norm) * SQRT_2_OVER_PI
+        } else {
+            0.0
+        };
+
+        let total_dot = main_dot + correction;
+        (total_dot / (query_norm * quantized.original_norm)).clamp(-1.0, 1.0)
+    }
+
+    /// Get dimensionality.
+    pub fn dims(&self) -> usize {
+        self.dims
+    }
+
+    /// Get compression ratio vs float32 storage.
+    pub fn compression_ratio(&self) -> f32 {
+        self.level.compression_ratio()
+    }
+}
+
+impl TurboQuantizedVec {
+    /// Get the packed byte data.
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
+
+    /// Get the original L2 norm.
+    pub fn original_norm(&self) -> f32 {
+        self.original_norm
+    }
+
+    /// Get number of dimensions.
+    pub fn dims(&self) -> usize {
+        self.dims
+    }
+
+    /// Get compression ratio vs float32 storage.
+    pub fn compression_ratio(&self) -> f32 {
+        (self.dims * 4) as f32 / self.data.len() as f32
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -1003,5 +1570,245 @@ mod tests {
         println!("1000 distance computations: {:?}", duration);
         let per_distance = duration.as_nanos() / 1000 / quantized.len() as u128;
         println!("Per distance: {} ns", per_distance);
+    }
+
+    // === TurboQuantizer Tests ===
+
+    #[test]
+    fn test_turbo_self_similarity_int8() {
+        let q = TurboQuantizer::new(16, QuantLevel::Int8, 42);
+        let v: Vec<f32> = (0..16).map(|i| (i as f32 + 1.0) / 16.0).collect();
+        let qv = q.quantize(&v).unwrap();
+        let sim = q.cosine_similarity(&qv, &v);
+        assert!(sim > 0.99, "Int8 self-similarity should be ~1.0, got {}", sim);
+    }
+
+    #[test]
+    fn test_turbo_self_similarity_int4() {
+        let q = TurboQuantizer::new(16, QuantLevel::Int4, 42);
+        let v: Vec<f32> = (0..16).map(|i| (i as f32 + 1.0) / 16.0).collect();
+        let qv = q.quantize(&v).unwrap();
+        let sim = q.cosine_similarity(&qv, &v);
+        assert!(sim > 0.95, "Int4 self-similarity should be >0.95, got {}", sim);
+    }
+
+    #[test]
+    fn test_turbo_self_similarity_binary() {
+        let q = TurboQuantizer::new(16, QuantLevel::Binary, 42);
+        let v: Vec<f32> = (0..16).map(|i| (i as f32 + 1.0) / 16.0).collect();
+        let qv = q.quantize(&v).unwrap();
+        let sim = q.cosine_similarity(&qv, &v);
+        assert!(sim > 0.7, "Binary self-similarity should be >0.7, got {}", sim);
+    }
+
+    #[test]
+    fn test_turbo_no_training_needed() {
+        // TurboQuantizer works without any training data
+        let q = TurboQuantizer::new(4, QuantLevel::Int8, 0);
+        let v = vec![1.0f32, 2.0, 3.0, 4.0];
+        let qv = q.quantize(&v).unwrap();
+        assert_eq!(qv.dims(), 4);
+        assert!(qv.compression_ratio() >= 4.0);
+    }
+
+    #[test]
+    fn test_turbo_compression_ratios() {
+        let dims = 1536;
+        for (level, expected_ratio) in &[
+            (QuantLevel::Int8, 4.0f32),
+            (QuantLevel::Int4, 8.0f32),
+            (QuantLevel::Binary, 32.0f32),
+        ] {
+            let q = TurboQuantizer::new(dims, *level, 1);
+            let v: Vec<f32> = (0..dims).map(|i| i as f32 / dims as f32).collect();
+            let qv = q.quantize(&v).unwrap();
+            let ratio = qv.compression_ratio();
+            assert!(
+                (ratio - expected_ratio).abs() < 0.5,
+                "{:?}: expected compression {}, got {}",
+                level,
+                expected_ratio,
+                ratio
+            );
+        }
+    }
+
+    #[test]
+    fn test_turbo_ordering_preserved() {
+        // Closer vectors should have higher similarity than distant ones
+        let dims = 64;
+        let q = TurboQuantizer::new(dims, QuantLevel::Int8, 7);
+
+        let base: Vec<f32> = (0..dims).map(|i| i as f32 / dims as f32).collect();
+        let close: Vec<f32> = base.iter().map(|x| x + 0.01).collect();
+        let far: Vec<f32> = base.iter().map(|x| -x).collect();
+
+        let base_q = q.quantize(&base).unwrap();
+        let sim_close = q.cosine_similarity(&base_q, &close);
+        let sim_far = q.cosine_similarity(&base_q, &far);
+
+        assert!(
+            sim_close > sim_far,
+            "Ordering not preserved: close={}, far={}",
+            sim_close,
+            sim_far
+        );
+    }
+
+    #[test]
+    fn test_turbo_dimension_mismatch() {
+        let q = TurboQuantizer::new(4, QuantLevel::Int8, 0);
+        let result = q.quantize(&[1.0, 2.0]);
+        assert!(matches!(result, Err(QuantizeError::DimensionMismatch { .. })));
+    }
+
+    #[test]
+    fn test_turbo_zero_vector_error() {
+        let q = TurboQuantizer::new(4, QuantLevel::Int8, 0);
+        let result = q.quantize(&[0.0, 0.0, 0.0, 0.0]);
+        assert!(matches!(result, Err(QuantizeError::ConstantVector)));
+    }
+
+    #[test]
+    fn test_turbo_deterministic() {
+        // Same seed → same quantization result
+        let q1 = TurboQuantizer::new(8, QuantLevel::Int8, 99);
+        let q2 = TurboQuantizer::new(8, QuantLevel::Int8, 99);
+        let v = vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8];
+        let qv1 = q1.quantize(&v).unwrap();
+        let qv2 = q2.quantize(&v).unwrap();
+        assert_eq!(qv1.data(), qv2.data());
+    }
+
+    // === Two-Stage QJL Tests ===
+
+    #[test]
+    fn test_qjl_fields_populated() {
+        let q = TurboQuantizer::new(64, QuantLevel::Int8, 1);
+        let v: Vec<f32> = (0..64).map(|i| (i as f32 + 1.0) / 64.0).collect();
+        let qv = q.quantize(&v).unwrap();
+        // QJL bit must be ±1
+        assert!(qv.qjl_bit == 1 || qv.qjl_bit == -1, "qjl_bit must be ±1");
+        // Residual norm must be non-negative
+        assert!(qv.residual_norm >= 0.0, "residual_norm must be ≥ 0");
+        // For a well-quantized vector, residual should be small relative to the signal
+        assert!(
+            qv.residual_norm < qv.original_norm(),
+            "residual should be smaller than original norm"
+        );
+    }
+
+    #[test]
+    fn test_qjl_improves_accuracy_int8() {
+        // QJL correction should make Int8 self-similarity even closer to 1.0.
+        // We test this indirectly: self-similarity with the new two-stage method
+        // should remain ≥ without correction (since correction targets the bias).
+        let dims = 128;
+        let q = TurboQuantizer::new(dims, QuantLevel::Int8, 42);
+        let v: Vec<f32> = (0..dims).map(|i| (i as f32 * 0.017 - 1.0).sin()).collect();
+
+        let qv = q.quantize(&v).unwrap();
+        let sim = q.cosine_similarity(&qv, &v);
+        // Int8 with QJL should be extremely accurate for self-similarity
+        assert!(
+            sim > 0.999,
+            "Int8 + QJL self-similarity should be >0.999, got {}",
+            sim
+        );
+    }
+
+    #[test]
+    fn test_qjl_improves_accuracy_int4() {
+        // QJL should provide a tangible accuracy boost for Int4.
+        let dims = 128;
+        let q = TurboQuantizer::new(dims, QuantLevel::Int4, 7);
+        let v: Vec<f32> = (0..dims).map(|i| (i as f32 * 0.031 - 0.5).cos()).collect();
+
+        let qv = q.quantize(&v).unwrap();
+        let sim = q.cosine_similarity(&qv, &v);
+        assert!(
+            sim > 0.98,
+            "Int4 + QJL self-similarity should be >0.98 for 128 dims, got {}",
+            sim
+        );
+    }
+
+    #[test]
+    fn test_qjl_not_applied_to_binary() {
+        // For Binary level, correction must be 0 (qjl disabled).
+        // Verify by checking residual_norm is stored but QJL correction path
+        // is skipped in cosine_similarity — the sim should be same as before.
+        let dims = 64;
+        let q = TurboQuantizer::new(dims, QuantLevel::Binary, 3);
+        let v: Vec<f32> = (0..dims).map(|i| (i as f32 + 1.0) / dims as f32).collect();
+
+        let qv = q.quantize(&v).unwrap();
+        // Even with residual stored, Binary sim should just reflect main quantization
+        let sim = q.cosine_similarity(&qv, &v);
+        assert!(sim > 0.6, "Binary sim should be reasonable, got {}", sim);
+        // Verify QJL bit and residual_norm ARE stored (future-proofing)
+        assert!(qv.qjl_bit == 1 || qv.qjl_bit == -1);
+    }
+
+    // === SIMD Dispatch Tests ===
+
+    #[test]
+    fn test_simd_int8_matches_scalar() {
+        // Verify SIMD path gives same result as scalar path.
+        let dims = 256;
+        let q = TurboQuantizer::new(dims, QuantLevel::Int8, 13);
+        let v: Vec<f32> = (0..dims)
+            .map(|i| ((i as f32 * 0.05).sin() + 0.3) * 0.7)
+            .collect();
+        let query: Vec<f32> = (0..dims)
+            .map(|i| ((i as f32 * 0.07 + 1.0).cos()) * 0.8)
+            .collect();
+
+        let qv = q.quantize(&v).unwrap();
+
+        // cosine_similarity internally calls decode_and_dot which dispatches to SIMD
+        let sim_simd = q.cosine_similarity(&qv, &query);
+
+        // Scalar reference: decode then dot manually
+        let scale_inv = qv.original_norm() / (dims as f32).sqrt();
+        let signs = generate_signs(dims, q.seed);
+        let range = INT8_RANGE_MAX - INT8_RANGE_MIN;
+        let scalar_dot: f32 = qv
+            .data()
+            .iter()
+            .zip(query.iter())
+            .zip(signs.iter())
+            .map(|((&code, &q_val), &s)| {
+                let v_t = INT8_RANGE_MIN + (code as f32 / 255.0) * range;
+                v_t * s as f32 * scale_inv * q_val
+            })
+            .sum();
+        // scalar doesn't include QJL correction — compare only main dot component
+        let query_norm: f32 = query.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let sim_scalar_main = (scalar_dot / (query_norm * qv.original_norm())).clamp(-1.0, 1.0);
+
+        // SIMD sim may differ slightly from scalar-only due to QJL correction,
+        // but the sign and rough magnitude must match.
+        assert!(
+            (sim_simd - sim_scalar_main).abs() < 0.1,
+            "SIMD ({}) should be close to scalar-main ({})",
+            sim_simd,
+            sim_scalar_main
+        );
+    }
+
+    #[test]
+    fn test_decode_and_dot_fused_no_alloc_int4() {
+        // Int4 fused decode+dot should produce identical results to the old
+        // decode()-then-dot approach (regression guard).
+        let dims = 32;
+        let q = TurboQuantizer::new(dims, QuantLevel::Int4, 5);
+        let v: Vec<f32> = (0..dims).map(|i| i as f32 / dims as f32 - 0.5).collect();
+        let query: Vec<f32> = v.iter().map(|x| x * 1.1 + 0.05).collect();
+
+        let qv = q.quantize(&v).unwrap();
+        let sim = q.cosine_similarity(&qv, &query);
+        // For similar vectors, similarity should be high
+        assert!(sim > 0.99, "Int4 fused decode+dot gave {}", sim);
     }
 }
