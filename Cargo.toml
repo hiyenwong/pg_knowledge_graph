@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 description = "PostgreSQL knowledge graph extension with graph algorithms and pgvector integration"
 license = "MIT"
+repository = "https://github.com/hiyenwong/pg_knowledge_graph"
+homepage = "https://github.com/hiyenwong/pg_knowledge_graph"
+keywords = ["postgresql", "graph", "knowledge-graph", "pgvector", "pgrx"]
+categories = ["database", "algorithms"]
+readme = "README.md"
 
 [lib]
 crate-type = ["cdylib", "lib"]
