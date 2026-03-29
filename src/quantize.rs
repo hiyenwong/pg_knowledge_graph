@@ -589,8 +589,8 @@ const LLOYD_1BIT: [f32; 2] = [-0.7979, 0.7979];
 /// 4-bit Lloyd-Max for N(0,1): 16 symmetric reconstruction levels.
 /// Computed numerically via Lloyd-Max algorithm on the standard Gaussian CDF.
 const LLOYD_4BIT: [f32; 16] = [
-    -2.7326, -2.0690, -1.6352, -1.2732, -0.9617, -0.6736, -0.3992, -0.1332,
-    0.1332, 0.3992, 0.6736, 0.9617, 1.2732, 1.6352, 2.0690, 2.7326,
+    -2.7326, -2.0690, -1.6352, -1.2732, -0.9617, -0.6736, -0.3992, -0.1332, 0.1332, 0.3992, 0.6736,
+    0.9617, 1.2732, 1.6352, 2.0690, 2.7326,
 ];
 
 /// 8-bit: uniform quantization over [-4, 4] is near-optimal for N(0,1).
@@ -622,7 +622,11 @@ const SQRT_2_OVER_PI: f32 = 0.797_884_6_f32;
 /// The sign flip decorrelates input dimensions before quantization,
 /// analogous to the random diagonal matrix D in SRHT.
 fn generate_signs(dims: usize, seed: u64) -> Vec<i8> {
-    let mut state = if seed == 0 { 0xdeadbeef_cafebabe_u64 } else { seed };
+    let mut state = if seed == 0 {
+        0xdeadbeef_cafebabe_u64
+    } else {
+        seed
+    };
     let mut signs = Vec::with_capacity(dims);
     for _ in 0..dims {
         state ^= state << 13;
@@ -698,7 +702,11 @@ impl TurboQuantizer {
     /// * `level` - Quantization precision (Int8=4x, Int4=8x, Binary=32x)
     /// * `seed` - RNG seed for sign flip; use 0 for a default seed
     pub fn new(dims: usize, level: QuantLevel, seed: u64) -> Self {
-        let seed = if seed == 0 { 0xdeadbeef_cafebabe_u64 } else { seed };
+        let seed = if seed == 0 {
+            0xdeadbeef_cafebabe_u64
+        } else {
+            seed
+        };
         Self { dims, level, seed }
     }
 
@@ -938,7 +946,13 @@ impl TurboQuantizer {
 
     /// Fused decode+dot for Int4. No SIMD specialisation (nibble unpacking
     /// is harder to vectorise; LLVM auto-vectorises naturally).
-    fn decode_dot_int4(data: &[u8], query: &[f32], signs: &[i8], scale_inv: f32, dims: usize) -> f32 {
+    fn decode_dot_int4(
+        data: &[u8],
+        query: &[f32],
+        signs: &[i8],
+        scale_inv: f32,
+        dims: usize,
+    ) -> f32 {
         let mut dot = 0.0f32;
         for (byte_idx, &byte) in data.iter().enumerate() {
             let lo_dim = byte_idx * 2;
@@ -956,7 +970,13 @@ impl TurboQuantizer {
     }
 
     /// Fused decode+dot for Binary. Table lookup ×2 values, 8 per byte.
-    fn decode_dot_binary(data: &[u8], query: &[f32], signs: &[i8], scale_inv: f32, dims: usize) -> f32 {
+    fn decode_dot_binary(
+        data: &[u8],
+        query: &[f32],
+        signs: &[i8],
+        scale_inv: f32,
+        dims: usize,
+    ) -> f32 {
         let mut dot = 0.0f32;
         for (byte_idx, &byte) in data.iter().enumerate() {
             for bit_idx in 0..8 {
@@ -1047,8 +1067,7 @@ impl TurboQuantizer {
         // QJL is only applied for Int8/Int4. For Binary (1-bit), the
         // quantization error is too large and not well-modelled by the JL
         // approximation — applying the correction degrades accuracy.
-        let correction = if quantized.level != QuantLevel::Binary
-            && quantized.residual_norm > 1e-10
+        let correction = if quantized.level != QuantLevel::Binary && quantized.residual_norm > 1e-10
         {
             let qjl_proj = generate_qjl_projection(self.dims, self.seed);
             // r · y  (query stays float32)
@@ -1580,7 +1599,11 @@ mod tests {
         let v: Vec<f32> = (0..16).map(|i| (i as f32 + 1.0) / 16.0).collect();
         let qv = q.quantize(&v).unwrap();
         let sim = q.cosine_similarity(&qv, &v);
-        assert!(sim > 0.99, "Int8 self-similarity should be ~1.0, got {}", sim);
+        assert!(
+            sim > 0.99,
+            "Int8 self-similarity should be ~1.0, got {}",
+            sim
+        );
     }
 
     #[test]
@@ -1589,7 +1612,11 @@ mod tests {
         let v: Vec<f32> = (0..16).map(|i| (i as f32 + 1.0) / 16.0).collect();
         let qv = q.quantize(&v).unwrap();
         let sim = q.cosine_similarity(&qv, &v);
-        assert!(sim > 0.95, "Int4 self-similarity should be >0.95, got {}", sim);
+        assert!(
+            sim > 0.95,
+            "Int4 self-similarity should be >0.95, got {}",
+            sim
+        );
     }
 
     #[test]
@@ -1598,7 +1625,11 @@ mod tests {
         let v: Vec<f32> = (0..16).map(|i| (i as f32 + 1.0) / 16.0).collect();
         let qv = q.quantize(&v).unwrap();
         let sim = q.cosine_similarity(&qv, &v);
-        assert!(sim > 0.7, "Binary self-similarity should be >0.7, got {}", sim);
+        assert!(
+            sim > 0.7,
+            "Binary self-similarity should be >0.7, got {}",
+            sim
+        );
     }
 
     #[test]
@@ -1659,7 +1690,10 @@ mod tests {
     fn test_turbo_dimension_mismatch() {
         let q = TurboQuantizer::new(4, QuantLevel::Int8, 0);
         let result = q.quantize(&[1.0, 2.0]);
-        assert!(matches!(result, Err(QuantizeError::DimensionMismatch { .. })));
+        assert!(matches!(
+            result,
+            Err(QuantizeError::DimensionMismatch { .. })
+        ));
     }
 
     #[test]

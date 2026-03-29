@@ -134,8 +134,7 @@ fn load_all_embeddings() -> Vec<EntityEmbedding> {
                     let name: String = row["name"].value::<String>()?.unwrap_or_default();
                     let entity_type: String =
                         row["entity_type"].value::<String>()?.unwrap_or_default();
-                    let emb_text: String =
-                        row["embedding"].value::<String>()?.unwrap_or_default();
+                    let emb_text: String = row["embedding"].value::<String>()?.unwrap_or_default();
 
                     // Parse pgvector text format "[v1,v2,...,vn]"
                     if let Some(embedding) = parse_vector_text(&emb_text) {
@@ -161,7 +160,10 @@ fn parse_vector_text(s: &str) -> Option<Vec<f32>> {
     if trimmed.is_empty() {
         return None;
     }
-    let values: Result<Vec<f32>, _> = trimmed.split(',').map(|v| v.trim().parse::<f32>()).collect();
+    let values: Result<Vec<f32>, _> = trimmed
+        .split(',')
+        .map(|v| v.trim().parse::<f32>())
+        .collect();
     values.ok().filter(|v| !v.is_empty())
 }
 
