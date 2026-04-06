@@ -1,0 +1,22 @@
+services:
+  postgres:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pg_knowledge_graph_test
+    ports:
+      - "5433:5432"          # Host 5433 avoids conflicts with local PG
+    environment:
+      POSTGRES_DB: kg_test
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - pg_kg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d kg_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pg_kg_data:
